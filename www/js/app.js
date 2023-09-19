@@ -40,7 +40,6 @@ var app = new Vue({
     created: function () {
         document.addEventListener("deviceready", this.init, false);
     },
-
     methods: {
     checkTotp: function () {
       this.totp = localStorage.getItem('totpObjects');
@@ -54,15 +53,142 @@ var app = new Vue({
 	   this.currentView = 'totp';
         }
     },
+  getValeurFromSQLite: function(cle) {
+   return new Promise((resolve, reject) => {
+     const db = window.sqlitePlugin.openDatabase({
+       name: 'esupAuth.db',
+       location: 'default',
+     });
+     db.transaction(function (tx) {
+       return new Promise((resolveTx, rejectTx) => {
+         tx.executeSql(
+           'SELECT valeur FROM otpStorage WHERE cle = ?',
+           [cle],
+           function (tx, results) {
+             if (results.rows.length > 0) {
+               const valeur = results.rows.item(0).valeur;
+               resolveTx(valeur);
+             } else {
+               rejectTx('Aucune valeur trouvée pour la clé ' + cle);
+             }
+           },
+           function (error) {
+             rejectTx(error);
+           }
+         );
+       })
+         .then((valeur) => {
+           resolve(valeur);
+         })
+         .catch((error) => {
+           reject(error);
+         });
+     });
+   });
+ },
+    transferLocalStorageToSQLite: function () {
+      return new Promise((resolve, reject) => {
+        const db = window.sqlitePlugin.openDatabase({
+          name: 'esupAuth.db',
+          location: 'default',
+        });
+
+        db.transaction((tx) => {
+          tx.executeSql('CREATE TABLE IF NOT EXISTS otpStorage (cle TEXT PRIMARY KEY, valeur TEXT)');
+        });
+
+        const insertOrUpdateData = (cle, valeur) => {
+          return new Promise((resolve, reject) => {
+            db.transaction((tx) => {
+              tx.executeSql('SELECT * FROM otpStorage WHERE cle = ?', [cle], (tx, results) => {
+                if (results.rows.length > 0) {
+                  tx.executeSql('UPDATE otpStorage SET valeur = ? WHERE cle = ?', [valeur, cle], () => {
+                    console.log("Données mises à jour pour la clé " + cle);
+                    resolve();
+                  });
+                } else {
+                  tx.executeSql('INSERT INTO otpStorage (cle, valeur) VALUES (?, ?)', [cle, valeur], () => {
+                    console.log("Données insérées pour la clé " + cle);
+                    resolve();
+                  });
+                }
+              });
+            });
+          });
+        };
+
+        (async () => {
+          for (let i = 0; i < localStorage.length; i++) {
+            const cle = localStorage.key(i);
+            const valeur = localStorage.getItem(cle);
+            try {
+              await insertOrUpdateData(cle, valeur);
+            } catch (error) {
+              console.error('Erreur lors de l\'insertion ou de la mise à jour des données :', error);
+              reject(error);
+              return;
+            }
+          }
+          resolve();
+        })();
+      });
+    },
+         deleteValueSQLite: function(cle) {
+          return new Promise((resolve, reject) => {
+            const db = window.sqlitePlugin.openDatabase({
+              name: 'esupAuth.db',
+              location: 'default',
+            });
+
+            db.transaction(function (tx) {
+              tx.executeSql(
+                'DELETE FROM otpStorage WHERE cle = ?',
+                [cle],
+                function (tx, result) {
+                  if (result.rowsAffected > 0) {
+                    console.log(`Suppression réussie pour la clé ${cle}`);
+                    resolve();
+                  } else {
+                    console.log(`Aucune ligne trouvée pour la clé ${cle}`);
+                    reject(`Aucune ligne trouvée pour la clé ${cle}`);
+                  }
+                },
+                function (tx, error) {
+                  console.error(`Erreur lors de la suppression de la clé ${cle}:`, error);
+                  reject(error);
+                }
+              );
+            });
+          });
+        },
             init : function () {
-            navigator.splashscreen.hide();
+           this.transferLocalStorageToSQLite()
+                 .then(() => {
+                   console.log('Données transférées avec succès dans SQLite');
+                 })
+                 .catch(error => {
+                   console.error('Erreur lors du transfert des données dans SQLite :', error);
+                 });
+                navigator.splashscreen.hide();
             if (cordova.platformId != 'android') {
                 StatusBar.backgroundColorByHexString("#212121");
             }
             this.storage= window.localStorage;
-            this.uid= this.storage.getItem('uid');
-            this.url= this.storage.getItem('url');
-            this.tokenSecret=this.storage.getItem('tokenSecret');
+            Promise.all([
+                             this.getValeurFromSQLite('uid'),
+                             this.getValeurFromSQLite('url'),
+                             this.getValeurFromSQLite('tokenSecret')
+                           ])
+                             .then(([valUid, valUrl, valTokenSecret]) => {
+                               this.uid = valUid;
+                               this.url = valUrl;
+                               this.tokenSecret = valTokenSecret;
+                             })
+                             .catch((errors) => {
+                               errors.forEach((error, index) => {
+                                 console.error(`Erreur lors de la récupération de valeur${index + 1}:`, error);
+                               });
+                             });
             this.platform = device.platform;
             this.manufacturer = device.manufacturer;
             this.model = device.model
@@ -227,6 +353,13 @@ desactivateUser: function (url, uid, tokenSecret, gcm_id) {
         desync: function () {
          if (window.confirm("Voulez-vous vraiment désactiver la connexion avec votre mobile ?")){
             var self = this;
+            this.deleteValueSQLite('uid')
+                                  .then(() => {
+                                    console.log('Valeur supprimée avec succès');
+                                  })
+                                  .catch((error) => {
+                                    console.log('Erreur lors de la suppression de la valeur:', error);
+                                  });
             $.ajax({
                 method : "DELETE",
                 url: this.url + 'users/' + this.uid + '/methods/push/' + this.tokenSecret,
@@ -236,6 +369,13 @@ desactivateUser: function (url, uid, tokenSecret, gcm_id) {
                     document.location.href = 'index.html';
                     Materialize.toast('Désactivation effectuée', 4000)
                     self.uid = null;
+                    this.deleteValueSQLite('uid')
+                      .then(() => {
+                        console.log('Valeur supprimée avec succès');
+                      })
+                      .catch((error) => {
+                        console.log('Erreur lors de la suppression de la valeur:', error);
+                      });
                     self.storage.removeItem('uid');
                     self.checkTotp();
                 }.bind(this),
